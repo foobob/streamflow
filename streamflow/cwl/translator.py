@@ -1617,6 +1617,22 @@ class CWLTranslator(object):
             # Add skip ports if there is a condition
             if 'when' in cwl_element.tool:
                 cast(CWLConditionalStep, conditional_step).add_skip_port(port_name, internal_output_ports[global_name])
+        # Process loop
+        if 'http://commonwl.org/cwltool#Loop' in requirements:
+            loop_requirement = requirements['http://commonwl.org/cwltool#Loop']
+            # Create conditional step
+            conditional_step = workflow.create_step(
+                cls=CWLConditionalStep,
+                name=step_name + "-loop-when",
+                expression=loop_requirement['loop_when'],
+                expression_lib=expression_lib,
+                full_js=full_js)
+            # Add inputs and outputs to conditional step
+            for global_name in input_ports:
+                port_name = posixpath.relpath(global_name, step_name)
+                conditional_step.add_input_port(port_name, self.input_ports[global_name])
+                self.input_ports[global_name] = workflow.create_port()
+                conditional_step.add_output_port(port_name, self.input_ports[global_name])
         # Update output ports with the internal ones
         self.output_ports = {**self.output_ports, **internal_output_ports}
         # Process inner element

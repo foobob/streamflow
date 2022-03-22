@@ -161,6 +161,27 @@ class CWLEmptyScatterConditionalStep(CWLBaseConditionalStep):
             port.put(ListToken(value=token_value, tag=get_tag(inputs.values())))
 
 
+class CWLLoopConditionalStep(CWLBaseConditionalStep):
+
+    async def _eval(self, inputs: MutableMapping[str, Token]):
+        context = utils.build_context(inputs)
+        condition = utils.eval_expression(
+            expression=self.expression,
+            context=context,
+            full_js=self.full_js,
+            expression_lib=self.expression_lib)
+        if condition is True or condition is False:
+            return condition
+        else:
+            raise WorkflowDefinitionException("Conditional 'when' must evaluate to 'true' or 'false'")
+
+    async def _on_true(self, inputs: MutableMapping[str, Token]):
+        pass
+
+    async def _on_false(self, inputs: MutableMapping[str, Token]):
+        pass
+
+
 class CWLInputInjectorStep(BaseStep):
 
     def __init__(self,
