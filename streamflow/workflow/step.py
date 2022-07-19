@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import posixpath
 from abc import ABC, abstractmethod
@@ -116,6 +117,14 @@ class Combinator(ABC):
                       token: Token) -> AsyncIterable[MutableMapping[str, Token]]:
         ...
 
+    def save(self):
+        return {
+            "name": self.name,
+            "combinators": {k: c.save() for k, c in self.combinators.items()},
+            "combinators_map": self.combinators_map,
+            "items": self.items
+        }
+
 
 class CombinatorStep(BaseStep):
 
@@ -161,6 +170,9 @@ class CombinatorStep(BaseStep):
                                 posixpath.join(self.name, task_name)), name=task_name))
         # Terminate step
         self.terminate(status)
+
+    def save(self) -> str:
+        return json.dumps({'combinator': self.combinator.save()})
 
 
 class ConditionalStep(BaseStep):
@@ -298,6 +310,11 @@ class DeployStep(BaseStep):
             logger.exception(e)
             self.terminate(Status.FAILED)
 
+    def save(self) -> str:
+        return json.dumps({
+            'deployment_config': self.deployment_config.persistent_id,
+            'connector_port': self.get_output_port(self.deployment_config.name).persistent_id})
+
 
 class ExecuteStep(BaseStep):
 
@@ -431,6 +448,9 @@ class ExecuteStep(BaseStep):
         # Terminate step
         self.terminate(_get_step_status(statuses))
 
+    def save(self) -> str:
+        return json.dumps({'job_port': self.get_input_port('__job__').persistent_id})
+
 
 class GatherStep(BaseStep):
 
@@ -477,6 +497,9 @@ class GatherStep(BaseStep):
         # Terminate step
         self.terminate(Status.SKIPPED if self.get_output_port().empty() else Status.COMPLETED)
 
+    def save(self) -> str:
+        return json.dumps({'depth': self.depth})
+
 
 class InputInjectorStep(BaseStep, ABC):
 
@@ -520,6 +543,9 @@ class InputInjectorStep(BaseStep, ABC):
                 self.get_output_port().put(await self.process_input(job, token.value))
         # Terminate step
         self.terminate(Status.SKIPPED if self.get_output_port().empty() else Status.COMPLETED)
+
+    def save(self) -> str:
+        return json.dumps({'job_port': self.get_input_port('__job__').persistent_id})
 
 
 class LoopCombinatorStep(CombinatorStep):
@@ -738,6 +764,16 @@ class ScheduleStep(BaseStep):
             logger.exception(e)
             self.terminate(Status.FAILED)
 
+    def save(self) -> str:
+        return json.dumps({
+            'connector_port': self.get_input_port('__connector__').persistent_id,
+            'job_port': self.get_output_port('__job__').persistent_id,
+            'target': self.target.persistent_id,
+            'hardware_requirement': self.hardware_requirement.save() if self.hardware_requirement else None,
+            'input_directory': self.input_directory,
+            'output_directory': self.output_directory,
+            'tmp_directory': self.tmp_directory})
+
 
 class ScatterStep(BaseStep):
 
@@ -833,6 +869,9 @@ class TransferStep(BaseStep, ABC):
                 self.terminate(Status.FAILED)
         # Terminate step
         self.terminate(status)
+
+    def save(self) -> str:
+        return json.dumps({'job_port': self.get_input_port('__job__').persistent_id})
 
     @abstractmethod
     async def transfer(self, job: Job, token: Token) -> Token:
