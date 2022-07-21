@@ -14,6 +14,10 @@ from streamflow.core.scheduling import Location
 from streamflow.deployment.connector.ssh import SSHConnector
 from streamflow.log_handler import logger
 
+#RBC add
+from streamflow.core.exception import WorkflowExecutionException
+
+
 
 class QueueManagerConnector(SSHConnector, ABC):
 
@@ -107,6 +111,11 @@ class QueueManagerConnector(SSHConnector, ABC):
                 location=location,
                 job="for job {job}".format(job=job_name) if job_name else ""))
             helper_file = await self._build_helper_file(command, location, environment, workdir)
+
+# RBC
+# this method does deal with any connector errors (e.g. a qsub that failed). I note this here
+# because what ever get returned here is assumed to be a valid job_id... 
+
             job_id = await self._run_batch_command(
                 helper_file=helper_file,
                 job_name=job_name,
@@ -124,6 +133,10 @@ class QueueManagerConnector(SSHConnector, ABC):
             while True:
                 async with self.jobsCacheLock:
                     running_jobs = await self._get_running_jobs(location)
+#RBC - here is what streamflow thinks the job_id of interest is
+#               print(job_id)
+#RBC - here is what streamflow thinks its running from qstat
+#               print(running_jobs)
                 if job_id not in running_jobs:
                     break
                 await asyncio.sleep(self.pollingInterval)
@@ -226,6 +239,12 @@ class PBSConnector(QueueManagerConnector):
                           job_id: str,
                           location: str) -> str:
         async with self._get_ssh_client(location) as ssh_client:
+#RBC
+            print("Check qstat -xf b4 - streamflow believe job has completed and looking for Output_Path")
+            print("self.scheduledJobs", self.scheduledJobs)
+            print( "qstat {job_id} -xf | sed -n 's/^\\s*Output_Path\\s=\\s.*:\\(.*\\)\\s*$/\\1/p'".format(
+                    job_id=job_id
+                ))
             output_path = (await ssh_client.run(
                 "qstat {job_id} -xf | sed -n 's/^\\s*Output_Path\\s=\\s.*:\\(.*\\)\\s*$/\\1/p'".format(
                     job_id=job_id
@@ -237,7 +256,27 @@ class PBSConnector(QueueManagerConnector):
                               job_id: str,
                               location: str) -> int:
         async with self._get_ssh_client(location) as ssh_client:
+#RBC
+            logger.info("RBC - streamflow believes job {job_ids} has completed".format(job_ids=job_id))
+            logger.info("RBC - going to sleep for 30 seconds to deal with devel queue race")
+
+            time.sleep(30)
+            # assumption here is that qstat will return info on specified job.
+            # and returned Exit_status will be changed from what pbs logged (from 0-9) to 1
+            logger.info("RBC - qstat {job_ids} -xf | sed -n 's/^\\s*Exit_status\\s=\\s\\([0-9]\\+\\)\\s*$/\\1/p'".format(
+                    job_ids=job_id
+                ))
+            #print("self.scheduledJobs", self.scheduledJobs)
+            #print("qstat {job_id} -xf | sed -n 's/^\\s*Exit_status\\s=\\s\\([0-9]\\+\\)\\s*$/\\1/p'".format(
+            #       job_id=job_id
+            #   ))
             return int((await ssh_client.run(
+                # RBC - This code should only be called when the job has correctly been determined to have completed.
+                # RBC -- breakage here occurs when a job is either lost for some reason (unlikely), or the 2nd qstat
+                # RBC -- issued below can't find the job its looking for. When this happens, this qstat will return a 
+                # RBC -- a blank string and barf.... So, its a fragile interface prone to breakage...
+                # RBC -- eliminate the -a from qstat because its unecessary and very heavyweight...
+                # ORIG  "qstat {job_id} -axf | sed -n 's/^\\s*Exit_status\\s=\\s\\([0-9]\\+\\)\\s*$/\\1/p'".format(
                 "qstat {job_id} -xf | sed -n 's/^\\s*Exit_status\\s=\\s\\([0-9]\\+\\)\\s*$/\\1/p'".format(
                     job_id=job_id
                 ))).stdout.strip())
@@ -246,8 +285,20 @@ class PBSConnector(QueueManagerConnector):
     async def _get_running_jobs(self,
                                 location: str) -> MutableSequence[str]:
         async with self._get_ssh_client(location) as ssh_client:
+#RBC
+            logger.info("RBC - streamflow checking for job completion - qstat -wx {job_ids}".format(job_ids=self.scheduledJobs))
+            #print("Check qstat -wx b4 - streamflow checking for job completion", self.scheduledJobs)
+            #print("self.scheduledJobs", self.scheduledJobs)
+            #print("qstat -wx {job_ids} | egrep '{grep_ids}' | awk '{{if($10 != \"E\" && $10 != \"F\") {{print $1}}}}'".format(
+            #        job_ids=" ".join(self.scheduledJobs),
+            #        grep_ids="\\|".join(self.scheduledJobs)))
+
             return (await ssh_client.run(
-                "qstat -awx {job_ids} | grep '{grep_ids}' | awk '{{if($10 != \"E\" && $10 != \"F\") {{print $1}}}}'".format(
+                # RBC - this is broken - reversing intent will require some quality lambrusco
+                # RBC ORIG "qstat -awx {job_ids} | grep '{grep_ids}' | awk '{{if($10 != \"E\" && $10 != \"F\") {{print $1}}}}'".format(
+                # RBC -- everyone has site specific thoughts about what qstat output looks like so we parse for nas.nasa.gov
+                # RBC -- output the full request ID for grepping and point to the correct field of interest
+                "qstat -W o=+reqid -wx {job_ids} | egrep '{grep_ids}' | awk '{{if($8 != \"E\" && $8 != \"F\") {{print $1}}}}'".format(
                     job_ids=" ".join(self.scheduledJobs),
                     grep_ids="\\|".join(self.scheduledJobs)
                 ))).stdout.strip().splitlines()
@@ -274,4 +325,30 @@ class PBSConnector(QueueManagerConnector):
             helper_file=helper_file)
         async with self._get_ssh_client(location) as ssh_client:
             result = await ssh_client.run(batch_command)
-        return result.stdout.strip()
+# RBC
+#
+# there are a couple issues that should be addressed here
+#
+# 1) the format of the job ID itself can vari depending on qstat output and site specific configurations - so this is broken at the NAS. 
+#    I corrected this in the calling routine, but it should likely be reformatted down in these connector specific rountines instead.
+#
+# 2) qsub can fail and the current code does not check for errors <raspberry>. The code calling also does no result checking.
+#    This is probably where error codes and result values need to be checked, as well as a way to gracefully exit on error...
+#    I need to see how thats done elsewhere...
+
+        if result.exit_status:
+            #print(result.exit_status)
+            #print(result.stderr)
+            raise WorkflowExecutionException( "exit_status(" + str(result.exit_status) + "): " + result.stderr.strip() )
+
+# RBC
+# we reset the generic full job id given by 123456.pbspl1.nas.nasa.gov
+# by choping off the .nas.nasa.gov. The reasoning why this is needed is site specific...
+# this code needs to be corrected so that we only reach this if the qsub actually resulted
+# in a sucessful job subnission.
+#           job_id='.'.join(job_id.replace("."," ").split()[0:2])
+       
+# ORIG  return result.stdout.strip()
+#       return result.stdout.strip()
+        print( result.stdout.strip())
+        return '.'.join(result.stdout.strip().replace("."," ").split()[0:2])
